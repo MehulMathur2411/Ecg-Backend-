@@ -8,9 +8,41 @@ from PyQt5.QtGui import QFont, QPixmap
 import numpy as np
 import pyqtgraph as pg
 from Patient import PatientPage
-from database import get_all_patients
+from database import get_patient_count
 
 
+# ---------------- Utility Functions ----------------
+def generate_base_signals(t):
+    """Simulate RA, LA, LL limb electrode signals."""
+    heart_rate = 60  # bpm
+    freq = heart_rate / 60.0
+    ecg_wave = np.sin(2 * np.pi * freq * t) + 0.05 * np.random.randn(len(t))
+    RA = ecg_wave + 0.01 * np.random.randn(len(t))
+    LA = ecg_wave * 0.9 + 0.01 * np.random.randn(len(t))
+    LL = ecg_wave * 1.1 + 0.01 * np.random.randn(len(t))
+    return RA, LA, LL
+
+def generate_chest_signals(t):
+    """Simulate chest leads (V1-V6)."""
+    return [
+        1.2*np.sin(2*np.pi*1*t + i*0.2) + 0.01*np.random.randn(len(t))
+        for i in range(6)
+    ]
+
+def compute_12_leads(RA, LA, LL, V_chest):
+    """Compute 12-lead ECG from limb and chest signals."""
+    Lead_I = LA - RA
+    Lead_II = LL - RA
+    Lead_III = LL - LA
+    aVR = RA - (LA + LL) / 2
+    aVL = LA - (RA + LL) / 2
+    aVF = LL - (RA + LA) / 2
+    WCT = (RA + LA + LL) / 3
+    V_leads = [v - WCT for v in V_chest]
+    return [Lead_I, Lead_II, Lead_III, aVR, aVL, aVF] + V_leads
+
+
+# ---------------- Dashboard Class ----------------
 class DashboardWindow(QMainWindow):
     def __init__(self, username="User", switch_to_login_callback=None):
         super().__init__()
@@ -19,26 +51,23 @@ class DashboardWindow(QMainWindow):
         self.resize(1200, 700)
         self.showMaximized()
 
-        # ---------- Main Container ----------
         container = QWidget()
         main_layout = QVBoxLayout(container)
 
-        # ---------- Header ----------
+        # Header
         header = self.create_header(username)
         main_layout.addWidget(header)
 
-        # ---------- Splitter for Sidebar + Content ----------
+        # Sidebar + Pages
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(2)
 
-        # Sidebar
         self.sidebar = self.create_sidebar()
         splitter.addWidget(self.sidebar)
 
-        # Pages
         self.pages = QStackedWidget()
         self.pages.addWidget(self.home_page(username))
-        self.pages.addWidget(self.ecg_page())
+        self.pages.addWidget(self.ecg_page())  # ECG Page
         self.patient_page = PatientPage(dashboard=self)
         self.pages.addWidget(self.patient_page)
         self.pages.addWidget(self.reports_page())
@@ -51,6 +80,10 @@ class DashboardWindow(QMainWindow):
         self.setCentralWidget(container)
         self.pages.setCurrentIndex(0)
 
+        # Update patient count after everything is loaded
+        self.update_patient_count_label()
+
+    # ---------- Header ----------
     def create_header(self, username):
         header_frame = QFrame()
         header_frame.setFixedHeight(70)
@@ -94,6 +127,7 @@ class DashboardWindow(QMainWindow):
         layout.addWidget(menu_button)
         return header_frame
 
+    # ---------- Sidebar ----------
     def create_sidebar(self):
         sidebar = QListWidget()
         sidebar.addItems(["🏠 Home", "📈 ECG Monitor", "👤 Patient Data", "📑 Reports", "⚙ Settings"])
@@ -113,6 +147,7 @@ class DashboardWindow(QMainWindow):
         sidebar.currentRowChanged.connect(self.switch_page)
         return sidebar
 
+    # ---------- Home Page ----------
     def home_page(self, username):
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -131,7 +166,7 @@ class DashboardWindow(QMainWindow):
         patient_layout = QVBoxLayout(patient_card)
         patient_label = QLabel("👥 Patients")
         patient_label.setFont(QFont("Arial", 14))
-        self.patient_count_label = QLabel(str(self.get_patient_count()))
+        self.patient_count_label = QLabel("0")
         self.patient_count_label.setFont(QFont("Arial", 24))
         patient_layout.addWidget(patient_label)
         patient_layout.addWidget(self.patient_count_label)
@@ -147,16 +182,8 @@ class DashboardWindow(QMainWindow):
         layout.addWidget(welcome)
         return page
 
-    def get_patient_count(self):
-        try:
-            patients = get_all_patients()
-            return len(patients)
-        except Exception as e:
-            print(f"Error fetching patient count: {e}")
-            return 0
-
-    def update_patient_count(self):
-        count = len(get_all_patients())
+    def update_patient_count_label(self):
+        count = get_patient_count()
         self.patient_count_label.setText(str(count))
 
     def create_card(self, title, value, color="#af3c19"):
@@ -171,6 +198,7 @@ class DashboardWindow(QMainWindow):
         layout.addWidget(label_value)
         return card
 
+    # ---------- ECG Page ----------
     def ecg_page(self):
         page = QWidget()
         main_layout = QVBoxLayout(page)
@@ -200,6 +228,21 @@ class DashboardWindow(QMainWindow):
         self.timer.start(20)
         return page
 
+    def update_all_ecg(self):
+        t = np.linspace(0, 1, 200) + self.ptrs[0] * 0.005
+        RA, LA, LL = generate_base_signals(t)
+        V_chest = generate_chest_signals(t)
+        leads = compute_12_leads(RA, LA, LL, V_chest)
+
+        for i, lead in enumerate(leads):
+            self.data[i] = np.roll(self.data[i], -1)
+            self.data[i][-1] = lead[-1]
+            self.curves[i].setData(self.data[i])
+
+        for i in range(12):
+            self.ptrs[i] += 1
+
+    # ---------- Other Pages ----------
     def reports_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -224,10 +267,3 @@ class DashboardWindow(QMainWindow):
 
     def switch_page(self, index):
         self.pages.setCurrentIndex(index)
-
-    def update_all_ecg(self):
-        for i in range(12):
-            self.ptrs[i] += 1
-            self.data[i] = np.roll(self.data[i], -1)
-            self.data[i][-1] = np.sin(0.1 * self.ptrs[i])
-            self.curves[i].setData(self.data[i])
